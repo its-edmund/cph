@@ -85,7 +85,7 @@ void handle_compile(const CommandArgs &args) {
   std::string ext = args.filename.substr(args.filename.find_last_of(".") + 1);
 
   if (ext == "cpp") {
-    cmd = "g++ -O2 -Wall " + args.filename + " -o " +
+    cmd = "g++-14 -O2 -Wall " + args.filename + " -o " +
           args.filename.substr(0, args.filename.find_last_of("."));
   } else if (ext == "java") {
     cmd = "javac " + args.filename;
