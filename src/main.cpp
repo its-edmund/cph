@@ -1,18 +1,27 @@
+#include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <regex>
+#include <optional>
 #include <sstream>
-#include <thread>
+#include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace fs = std::filesystem;
 using namespace std::chrono;
 
-const std::string TEMPLATE_DIR =
-    std::string(getenv("HOME")) + "/.cp_helper/templates/";
+std::string template_dir() {
+  const char *home = std::getenv("HOME");
+  if (home == nullptr || *home == '\0') {
+    return "./.cp_helper/templates/";
+  }
+  return std::string(home) + "/.cp_helper/templates/";
+}
 
 struct CommandArgs {
   std::string command;
@@ -27,7 +36,7 @@ using namespace std;
 int main() {
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
-    
+
     return 0;
 })";
 }
@@ -35,7 +44,7 @@ int main() {
 std::string get_py_template() {
   return R"(import sys
 
-input = sys.stdin.read
+input = sys.stdin.readline
 
 def main():
     pass
@@ -52,6 +61,41 @@ std::string get_java_template() {
 })";
 }
 
+std::string default_template(const std::string &ext) {
+  if (ext == "cpp") return get_cpp_template();
+  if (ext == "py") return get_py_template();
+  if (ext == "java") return get_java_template();
+  return "";
+}
+
+std::optional<std::string> load_custom_template(const std::string &ext) {
+  fs::path path = fs::path(template_dir()) / ("template." + ext);
+  std::error_code ec;
+  if (!fs::exists(path, ec)) return std::nullopt;
+  std::ifstream f(path);
+  if (!f) return std::nullopt;
+  std::ostringstream ss;
+  ss << f.rdbuf();
+  return ss.str();
+}
+
+std::string extension_of(const std::string &filename) {
+  auto pos = filename.find_last_of('.');
+  if (pos == std::string::npos || pos == filename.size() - 1) return "";
+  return filename.substr(pos + 1);
+}
+
+std::string stem_of(const std::string &filename) {
+  auto pos = filename.find_last_of('.');
+  if (pos == std::string::npos) return filename;
+  return filename.substr(0, pos);
+}
+
+std::string resolve_extension(const CommandArgs &args) {
+  if (!args.language.empty()) return args.language;
+  return extension_of(args.filename);
+}
+
 void create_file(const std::string &filename, const std::string &content) {
   std::ofstream file(filename);
   if (file) {
@@ -63,30 +107,52 @@ void create_file(const std::string &filename, const std::string &content) {
 }
 
 void handle_new(const CommandArgs &args) {
-  std::string ext = args.filename.substr(args.filename.find_last_of(".") + 1);
-  std::string content;
+  std::string ext = resolve_extension(args);
+  if (ext.empty()) {
+    std::cerr << "Could not determine file extension for: " << args.filename
+              << " (pass -l <cpp|py|java>)" << std::endl;
+    return;
+  }
 
-  if (ext == "cpp")
-    content = get_cpp_template();
-  else if (ext == "py")
-    content = get_py_template();
-  else if (ext == "java")
-    content = get_java_template();
-  else {
+  std::string content;
+  if (auto custom = load_custom_template(ext)) {
+    content = *custom;
+  } else {
+    content = default_template(ext);
+  }
+  if (content.empty()) {
     std::cerr << "Unsupported file type: " << ext << std::endl;
     return;
   }
 
+  if (fs::exists(args.filename)) {
+    std::cerr << "Refusing to overwrite existing file: " << args.filename
+              << std::endl;
+    return;
+  }
   create_file(args.filename, content);
+
+  std::string base = stem_of(fs::path(args.filename).filename().string());
+  fs::path test_dir = fs::path("tests") / base;
+  std::error_code ec;
+  fs::create_directories(test_dir, ec);
+  if (ec) {
+    std::cerr << "Warning: could not create test directory " << test_dir
+              << ": " << ec.message() << std::endl;
+    return;
+  }
+  std::ofstream(test_dir / "input_1.txt");
+  std::ofstream(test_dir / "output_1.txt");
+  std::cout << "Created test directory: " << test_dir << std::endl;
 }
 
 void handle_compile(const CommandArgs &args) {
+  std::string ext = resolve_extension(args);
+  std::string stem = stem_of(args.filename);
   std::string cmd;
-  std::string ext = args.filename.substr(args.filename.find_last_of(".") + 1);
 
   if (ext == "cpp") {
-    cmd = "g++-14 -O2 -Wall " + args.filename + " -o " +
-          args.filename.substr(0, args.filename.find_last_of("."));
+    cmd = "g++-14 -O2 -Wall " + args.filename + " -o " + stem;
   } else if (ext == "java") {
     cmd = "javac " + args.filename;
   } else {
@@ -103,25 +169,61 @@ void handle_compile(const CommandArgs &args) {
 }
 
 std::string execute_program(const std::string &cmd, const std::string &input) {
-  std::string full_cmd = "echo \"" + input + "\" | " + cmd;
-  FILE *pipe = popen(full_cmd.c_str(), "r");
-  if (!pipe)
-    return "ERROR";
+  char tmpl[] = "/tmp/cph_input_XXXXXX";
+  int fd = mkstemp(tmpl);
+  if (fd == -1) return "ERROR";
+  if (!input.empty()) {
+    ssize_t written = write(fd, input.data(), input.size());
+    if (written < 0 || static_cast<size_t>(written) != input.size()) {
+      close(fd);
+      unlink(tmpl);
+      return "ERROR";
+    }
+  }
+  close(fd);
 
-  char buffer[128];
+  std::string full_cmd = cmd + " < " + tmpl + " 2>&1";
+  FILE *pipe = popen(full_cmd.c_str(), "r");
+  if (!pipe) {
+    unlink(tmpl);
+    return "ERROR";
+  }
+
+  char buffer[4096];
   std::string result;
   while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
     result += buffer;
   }
   pclose(pipe);
+  unlink(tmpl);
   return result;
 }
 
+std::string normalize_output(const std::string &s) {
+  std::vector<std::string> lines;
+  std::istringstream iss(s);
+  std::string line;
+  while (std::getline(iss, line)) {
+    while (!line.empty() &&
+           std::isspace(static_cast<unsigned char>(line.back()))) {
+      line.pop_back();
+    }
+    lines.push_back(line);
+  }
+  while (!lines.empty() && lines.back().empty()) lines.pop_back();
+
+  std::string out;
+  for (size_t i = 0; i < lines.size(); ++i) {
+    if (i > 0) out += '\n';
+    out += lines[i];
+  }
+  return out;
+}
+
 void handle_test(const CommandArgs &args) {
-  std::string base_name =
-      args.filename.substr(0, args.filename.find_last_of("."));
-  std::string ext = args.filename.substr(args.filename.find_last_of(".") + 1);
-  fs::path test_dir = "tests" / fs::path(base_name);
+  std::string base_name = stem_of(args.filename);
+  std::string ext = resolve_extension(args);
+  fs::path test_dir = fs::path("tests") / fs::path(base_name).filename();
 
   if (!fs::exists(test_dir)) {
     std::cerr << "Test directory not found: " << test_dir << std::endl;
@@ -134,70 +236,104 @@ void handle_test(const CommandArgs &args) {
   else if (ext == "py")
     exec_cmd = "python3 " + args.filename;
   else if (ext == "java")
-    exec_cmd = "java -cp . " + base_name;
+    exec_cmd = "java -cp . " + fs::path(base_name).filename().string();
   else {
     std::cerr << "Unsupported file type: " << ext << std::endl;
     return;
   }
 
+  std::vector<fs::path> inputs;
   for (const auto &entry : fs::directory_iterator(test_dir)) {
     if (entry.path().filename().string().find("input") != std::string::npos) {
-      std::string input_file = entry.path().string();
-      std::string output_file =
-          std::regex_replace(input_file, std::regex("input"), "output");
-
-      std::ifstream in(input_file);
-      std::ifstream out(output_file);
-      if (!in || !out)
-        continue;
-
-      std::string input((std::istreambuf_iterator<char>(in)),
-                        std::istreambuf_iterator<char>());
-      std::string expected((std::istreambuf_iterator<char>(out)),
-                           std::istreambuf_iterator<char>());
-
-      auto start = high_resolution_clock::now();
-      std::string actual = execute_program(exec_cmd, input);
-      auto duration =
-          duration_cast<milliseconds>(high_resolution_clock::now() - start);
-
-      // Remove trailing newlines for comparison
-      actual.erase(std::remove(actual.begin(), actual.end(), '\n'),
-                   actual.end());
-      expected.erase(std::remove(expected.begin(), expected.end(), '\n'),
-                     expected.end());
-
-      std::cout << "Test Case: " << entry.path().filename() << std::endl;
-      std::cout << "Status: " << (actual == expected ? "PASS" : "FAIL")
-                << std::endl;
-      std::cout << "Time: " << duration.count() << "ms\n";
-
-      if (actual != expected) {
-        std::cout << "Expected:\n" << expected << "\n";
-        std::cout << "Actual:\n" << actual << "\n";
-      }
-      std::cout << std::string(40, '-') << std::endl;
+      inputs.push_back(entry.path());
     }
   }
+  std::sort(inputs.begin(), inputs.end());
+
+  if (inputs.empty()) {
+    std::cerr << "No input files found in " << test_dir << std::endl;
+    return;
+  }
+
+  int passed = 0, total = 0;
+  for (const auto &input_path : inputs) {
+    std::string input_file = input_path.string();
+    std::string output_file =
+        (input_path.parent_path() /
+         ("output" + input_path.filename().string().substr(5)))
+            .string();
+
+    std::ifstream in(input_file);
+    std::ifstream out(output_file);
+    if (!in || !out) {
+      std::cerr << "Skipping " << input_path.filename()
+                << " (missing matching output file)" << std::endl;
+      continue;
+    }
+
+    std::string input((std::istreambuf_iterator<char>(in)),
+                      std::istreambuf_iterator<char>());
+    std::string expected((std::istreambuf_iterator<char>(out)),
+                         std::istreambuf_iterator<char>());
+
+    auto start = high_resolution_clock::now();
+    std::string actual = execute_program(exec_cmd, input);
+    auto duration =
+        duration_cast<milliseconds>(high_resolution_clock::now() - start);
+
+    std::string actual_norm = normalize_output(actual);
+    std::string expected_norm = normalize_output(expected);
+    bool ok = actual_norm == expected_norm;
+
+    total++;
+    if (ok) passed++;
+
+    std::cout << "Test Case: " << input_path.filename() << std::endl;
+    std::cout << "Status: " << (ok ? "PASS" : "FAIL") << std::endl;
+    std::cout << "Time: " << duration.count() << "ms\n";
+
+    if (!ok) {
+      std::cout << "Expected:\n" << expected_norm << "\n";
+      std::cout << "Actual:\n" << actual_norm << "\n";
+    }
+    std::cout << std::string(40, '-') << std::endl;
+  }
+  std::cout << "Summary: " << passed << "/" << total << " passed" << std::endl;
+}
+
+void print_usage(const char *prog) {
+  std::cerr << "Usage: " << prog << " <command> <filename> [-l <lang>]\n"
+            << "Commands:\n"
+            << "  new      Create a new source file and tests/<stem>/\n"
+            << "  compile  Compile a source file\n"
+            << "  test     Run tests in tests/<stem>/\n"
+            << "Languages: cpp, py, java (detected from extension, or -l)\n";
 }
 
 CommandArgs parse_arguments(int argc, char *argv[]) {
   CommandArgs args;
-  if (argc < 2) {
-    std::cerr << "Usage: " << argv[0] << " <command> [options]" << std::endl;
+  if (argc < 3) {
+    print_usage(argv[0]);
     exit(1);
   }
 
   args.command = argv[1];
-  if (args.command == "new" && argc >= 3) {
-    args.filename = argv[2];
-    if (argc >= 4)
-      args.language = argv[3];
-  } else if ((args.command == "compile" || args.command == "test") &&
-             argc >= 3) {
-    args.filename = argv[2];
-  } else {
-    std::cerr << "Invalid command or arguments" << std::endl;
+  args.filename = argv[2];
+  for (int i = 3; i < argc; ++i) {
+    std::string flag = argv[i];
+    if (flag == "-l" && i + 1 < argc) {
+      args.language = argv[++i];
+    } else {
+      std::cerr << "Unknown argument: " << flag << std::endl;
+      print_usage(argv[0]);
+      exit(1);
+    }
+  }
+
+  if (args.command != "new" && args.command != "compile" &&
+      args.command != "test") {
+    std::cerr << "Unknown command: " << args.command << std::endl;
+    print_usage(argv[0]);
     exit(1);
   }
   return args;
@@ -212,9 +348,6 @@ int main(int argc, char *argv[]) {
     handle_compile(args);
   } else if (args.command == "test") {
     handle_test(args);
-  } else {
-    std::cerr << "Unknown command: " << args.command << std::endl;
-    return 1;
   }
 
   return 0;
