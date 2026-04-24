@@ -258,6 +258,7 @@ void handle_run(const CommandArgs &args) {
 }
 
 void handle_test(const CommandArgs &args) {
+  std::string ext = resolve_extension(args);
   std::string base_name = stem_of(args.filename);
   fs::path test_dir = fs::path("tests") / fs::path(base_name).filename();
 
@@ -268,10 +269,11 @@ void handle_test(const CommandArgs &args) {
 
   std::string exec_cmd = build_exec_command(args);
   if (exec_cmd.empty()) {
-    std::cerr << "Unsupported file type: " << resolve_extension(args)
-              << std::endl;
+    std::cerr << "Unsupported file type: " << ext << std::endl;
     return;
   }
+
+  if (!compile_source(args, false)) return;
 
   std::vector<fs::path> inputs;
   for (const auto &entry : fs::directory_iterator(test_dir)) {
@@ -330,6 +332,13 @@ void handle_test(const CommandArgs &args) {
     std::cout << std::string(40, '-') << std::endl;
   }
   std::cout << "Summary: " << passed << "/" << total << " passed" << std::endl;
+
+  std::error_code ec;
+  if (ext == "cpp") {
+    fs::remove(base_name, ec);
+  } else if (ext == "java") {
+    fs::remove(base_name + ".class", ec);
+  }
 }
 
 void print_usage(const char *prog) {
