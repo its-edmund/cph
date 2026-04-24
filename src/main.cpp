@@ -220,9 +220,31 @@ std::string normalize_output(const std::string &s) {
   return out;
 }
 
+std::string build_exec_command(const CommandArgs &args) {
+  std::string ext = resolve_extension(args);
+  std::string base_name = stem_of(args.filename);
+  if (ext == "cpp") return "./" + base_name;
+  if (ext == "py") return "python3 " + args.filename;
+  if (ext == "java")
+    return "java -cp . " + fs::path(base_name).filename().string();
+  return "";
+}
+
+void handle_run(const CommandArgs &args) {
+  std::string exec_cmd = build_exec_command(args);
+  if (exec_cmd.empty()) {
+    std::cerr << "Unsupported file type: " << resolve_extension(args)
+              << std::endl;
+    return;
+  }
+  int result = std::system(exec_cmd.c_str());
+  if (result != 0) {
+    std::cerr << "Program exited with non-zero status: " << result << std::endl;
+  }
+}
+
 void handle_test(const CommandArgs &args) {
   std::string base_name = stem_of(args.filename);
-  std::string ext = resolve_extension(args);
   fs::path test_dir = fs::path("tests") / fs::path(base_name).filename();
 
   if (!fs::exists(test_dir)) {
@@ -230,15 +252,10 @@ void handle_test(const CommandArgs &args) {
     return;
   }
 
-  std::string exec_cmd;
-  if (ext == "cpp")
-    exec_cmd = "./" + base_name;
-  else if (ext == "py")
-    exec_cmd = "python3 " + args.filename;
-  else if (ext == "java")
-    exec_cmd = "java -cp . " + fs::path(base_name).filename().string();
-  else {
-    std::cerr << "Unsupported file type: " << ext << std::endl;
+  std::string exec_cmd = build_exec_command(args);
+  if (exec_cmd.empty()) {
+    std::cerr << "Unsupported file type: " << resolve_extension(args)
+              << std::endl;
     return;
   }
 
@@ -306,6 +323,7 @@ void print_usage(const char *prog) {
             << "Commands:\n"
             << "  new      Create a new source file and tests/<stem>/\n"
             << "  compile  Compile a source file\n"
+            << "  run      Run the program interactively (stdin from terminal)\n"
             << "  test     Run tests in tests/<stem>/\n"
             << "Languages: cpp, py, java (detected from extension, or -l)\n";
 }
@@ -331,7 +349,7 @@ CommandArgs parse_arguments(int argc, char *argv[]) {
   }
 
   if (args.command != "new" && args.command != "compile" &&
-      args.command != "test") {
+      args.command != "run" && args.command != "test") {
     std::cerr << "Unknown command: " << args.command << std::endl;
     print_usage(argv[0]);
     exit(1);
@@ -346,6 +364,8 @@ int main(int argc, char *argv[]) {
     handle_new(args);
   } else if (args.command == "compile") {
     handle_compile(args);
+  } else if (args.command == "run") {
+    handle_run(args);
   } else if (args.command == "test") {
     handle_test(args);
   }
