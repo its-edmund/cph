@@ -146,7 +146,7 @@ void handle_new(const CommandArgs &args) {
   std::cout << "Created test directory: " << test_dir << std::endl;
 }
 
-void handle_compile(const CommandArgs &args) {
+bool compile_source(const CommandArgs &args, bool announce) {
   std::string ext = resolve_extension(args);
   std::string stem = stem_of(args.filename);
   std::string cmd;
@@ -156,17 +156,20 @@ void handle_compile(const CommandArgs &args) {
   } else if (ext == "java") {
     cmd = "javac " + args.filename;
   } else {
-    std::cout << "No compilation needed" << std::endl;
-    return;
+    if (announce) std::cout << "No compilation needed" << std::endl;
+    return true;
   }
 
   int result = std::system(cmd.c_str());
   if (result != 0) {
     std::cerr << "Compilation failed!" << std::endl;
-  } else {
-    std::cout << "Compilation successful" << std::endl;
+    return false;
   }
+  if (announce) std::cout << "Compilation successful" << std::endl;
+  return true;
 }
+
+void handle_compile(const CommandArgs &args) { compile_source(args, true); }
 
 std::string execute_program(const std::string &cmd, const std::string &input) {
   char tmpl[] = "/tmp/cph_input_XXXXXX";
@@ -231,15 +234,26 @@ std::string build_exec_command(const CommandArgs &args) {
 }
 
 void handle_run(const CommandArgs &args) {
+  std::string ext = resolve_extension(args);
   std::string exec_cmd = build_exec_command(args);
   if (exec_cmd.empty()) {
-    std::cerr << "Unsupported file type: " << resolve_extension(args)
-              << std::endl;
+    std::cerr << "Unsupported file type: " << ext << std::endl;
     return;
   }
+
+  if (!compile_source(args, false)) return;
+
   int result = std::system(exec_cmd.c_str());
   if (result != 0) {
     std::cerr << "Program exited with non-zero status: " << result << std::endl;
+  }
+
+  std::string stem = stem_of(args.filename);
+  std::error_code ec;
+  if (ext == "cpp") {
+    fs::remove(stem, ec);
+  } else if (ext == "java") {
+    fs::remove(stem + ".class", ec);
   }
 }
 
