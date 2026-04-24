@@ -245,6 +245,24 @@ bool compile_source(const CommandArgs &args, bool announce) {
 
 void handle_compile(const CommandArgs &args) { compile_source(args, true); }
 
+std::string execute_program_file_io(const std::string &cmd,
+                                    const std::string &input,
+                                    const std::string &io_stem) {
+  std::ofstream in_file(io_stem + ".in");
+  if (!in_file) return "ERROR";
+  in_file << input;
+  in_file.close();
+
+  std::string full_cmd = cmd + " >/dev/null 2>/dev/null";
+  (void)std::system(full_cmd.c_str());
+
+  std::ifstream out_file(io_stem + ".out");
+  if (!out_file) return "";
+  std::ostringstream ss;
+  ss << out_file.rdbuf();
+  return ss.str();
+}
+
 std::string execute_program(const std::string &cmd, const std::string &input) {
   char tmpl[] = "/tmp/cph_input_XXXXXX";
   int fd = mkstemp(tmpl);
@@ -349,6 +367,9 @@ void handle_test(const CommandArgs &args) {
 
   if (!compile_source(args, false)) return;
 
+  bool file_io = (args.platform == "usaco");
+  std::string io_stem = fs::path(base_name).filename().string();
+
   std::vector<fs::path> inputs;
   for (const auto &entry : fs::directory_iterator(test_dir)) {
     if (entry.path().filename().string().find("input") != std::string::npos) {
@@ -384,7 +405,9 @@ void handle_test(const CommandArgs &args) {
                          std::istreambuf_iterator<char>());
 
     auto start = high_resolution_clock::now();
-    std::string actual = execute_program(exec_cmd, input);
+    std::string actual = file_io
+                             ? execute_program_file_io(exec_cmd, input, io_stem)
+                             : execute_program(exec_cmd, input);
     auto duration =
         duration_cast<milliseconds>(high_resolution_clock::now() - start);
 
@@ -412,6 +435,10 @@ void handle_test(const CommandArgs &args) {
     fs::remove(base_name, ec);
   } else if (ext == "java") {
     fs::remove(base_name + ".class", ec);
+  }
+  if (file_io) {
+    fs::remove(io_stem + ".in", ec);
+    fs::remove(io_stem + ".out", ec);
   }
 }
 
