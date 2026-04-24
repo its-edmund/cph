@@ -27,6 +27,7 @@ struct CommandArgs {
   std::string command;
   std::string filename;
   std::string language;
+  std::string platform;
 };
 
 std::string get_cpp_template() {
@@ -61,15 +62,62 @@ std::string get_java_template() {
 })";
 }
 
-std::string default_template(const std::string &ext) {
+std::string get_cpp_usaco_template() {
+  return R"(#include <bits/stdc++.h>
+using namespace std;
+
+int main() {
+    ios::sync_with_stdio(false);
+    cin.tie(nullptr);
+    freopen("{stem}.in", "r", stdin);
+    freopen("{stem}.out", "w", stdout);
+
+    return 0;
+})";
+}
+
+std::string get_py_usaco_template() {
+  return R"(import sys
+
+sys.stdin = open("{stem}.in", "r")
+sys.stdout = open("{stem}.out", "w")
+
+def main():
+    pass
+
+if __name__ == '__main__':
+    main())";
+}
+
+std::string get_java_usaco_template() {
+  return R"(import java.io.*;
+import java.util.*;
+
+public class Main {
+    public static void main(String[] args) throws IOException {
+        BufferedReader in = new BufferedReader(new FileReader("{stem}.in"));
+        PrintWriter out = new PrintWriter(new FileWriter("{stem}.out"));
+
+        out.close();
+    }
+})";
+}
+
+std::string default_template(const std::string &ext,
+                             const std::string &platform) {
+  if (platform == "usaco") {
+    if (ext == "cpp") return get_cpp_usaco_template();
+    if (ext == "py") return get_py_usaco_template();
+    if (ext == "java") return get_java_usaco_template();
+    return "";
+  }
   if (ext == "cpp") return get_cpp_template();
   if (ext == "py") return get_py_template();
   if (ext == "java") return get_java_template();
   return "";
 }
 
-std::optional<std::string> load_custom_template(const std::string &ext) {
-  fs::path path = fs::path(template_dir()) / ("template." + ext);
+std::optional<std::string> read_file(const fs::path &path) {
   std::error_code ec;
   if (!fs::exists(path, ec)) return std::nullopt;
   std::ifstream f(path);
@@ -77,6 +125,27 @@ std::optional<std::string> load_custom_template(const std::string &ext) {
   std::ostringstream ss;
   ss << f.rdbuf();
   return ss.str();
+}
+
+std::optional<std::string> load_custom_template(const std::string &ext,
+                                                const std::string &platform) {
+  fs::path base = template_dir();
+  if (!platform.empty()) {
+    if (auto content = read_file(base / platform / ("template." + ext))) {
+      return content;
+    }
+  }
+  return read_file(base / ("template." + ext));
+}
+
+std::string substitute_stem(std::string content, const std::string &stem) {
+  const std::string placeholder = "{stem}";
+  size_t pos = 0;
+  while ((pos = content.find(placeholder, pos)) != std::string::npos) {
+    content.replace(pos, placeholder.size(), stem);
+    pos += stem.size();
+  }
+  return content;
 }
 
 std::string extension_of(const std::string &filename) {
@@ -114,16 +183,22 @@ void handle_new(const CommandArgs &args) {
     return;
   }
 
+  std::string base = stem_of(fs::path(args.filename).filename().string());
+
   std::string content;
-  if (auto custom = load_custom_template(ext)) {
+  if (auto custom = load_custom_template(ext, args.platform)) {
     content = *custom;
   } else {
-    content = default_template(ext);
+    content = default_template(ext, args.platform);
   }
   if (content.empty()) {
-    std::cerr << "Unsupported file type: " << ext << std::endl;
+    std::cerr << "Unsupported file type: " << ext;
+    if (!args.platform.empty())
+      std::cerr << " for platform: " << args.platform;
+    std::cerr << std::endl;
     return;
   }
+  content = substitute_stem(content, base);
 
   if (fs::exists(args.filename)) {
     std::cerr << "Refusing to overwrite existing file: " << args.filename
@@ -132,7 +207,6 @@ void handle_new(const CommandArgs &args) {
   }
   create_file(args.filename, content);
 
-  std::string base = stem_of(fs::path(args.filename).filename().string());
   fs::path test_dir = fs::path("tests") / base;
   std::error_code ec;
   fs::create_directories(test_dir, ec);
@@ -342,7 +416,8 @@ void handle_test(const CommandArgs &args) {
 }
 
 void print_usage(const char *prog) {
-  std::cerr << "Usage: " << prog << " <command> <filename> [-l <lang>]\n"
+  std::cerr << "Usage: " << prog
+            << " <command> <filename> [-l <lang>] [-p <platform>]\n"
             << "Commands:\n"
             << "  new      Create a new source file and tests/<stem>/\n"
             << "  compile  Compile a source file\n"
@@ -364,6 +439,8 @@ CommandArgs parse_arguments(int argc, char *argv[]) {
     std::string flag = argv[i];
     if (flag == "-l" && i + 1 < argc) {
       args.language = argv[++i];
+    } else if (flag == "-p" && i + 1 < argc) {
+      args.platform = argv[++i];
     } else {
       std::cerr << "Unknown argument: " << flag << std::endl;
       print_usage(argv[0]);
